@@ -1,0 +1,65 @@
+{
+	"schema": 1,
+	"cves": [
+		{
+			"id": "CVE-2025-52471",
+			"component": "ESP-NOW",
+			"symbol": "esp_now_",
+			"marker": "ESP-NOW",
+			"summary": "integer underflow may allow out-of-bounds access",
+			"advisory": "GHSA-hqhh-cp47-fv5g",
+			"first": "5.4.1",
+			"fixed": "5.4.2"
+		},
+		{
+			"id": "CVE-2025-55297",
+			"component": "BluFi",
+			"symbol": "esp_blufi_",
+			"marker": "BLUFI",
+			"summary": "credential and key-exchange memory overflows",
+			"advisory": "GHSA-9w88-r2vm-qfc4",
+			"first": "5.4.0",
+			"fixed": "5.4.1"
+		},
+		{
+			"id": "CVE-2026-45541",
+			"component": "ESP HTTP WebSocket server",
+			"symbol": "httpd_ws_",
+			"marker": "Sec-WebSocket-Protocol",
+			"summary": "malformed subprotocol header may remotely crash the server",
+			"advisory": "GHSA-3j8v-xgrq-5vg8",
+			"first": "5.4.0",
+			"fixed": "5.4.5"
+		},
+		{
+			"id": "CVE-2026-45160",
+			"component": "lwIP DHCP server",
+			"symbol": "dhcps",
+			"marker": "dhcpserver",
+			"summary": "DHCP option parsing may read out of bounds",
+			"advisory": "GHSA-g764-gwc3-75m5",
+			"first": "5.4.0",
+			"fixed": "5.4.5"
+		},
+		{
+			"id": "CVE-2026-55687",
+			"component": "ESP JPEG decoder",
+			"symbol": "jpeg_parse_",
+			"marker": "jpeg_parse_dqt",
+			"summary": "crafted DQT marker may write out of bounds",
+			"advisory": "GHSA-v6r2-f6p2-88cj",
+			"first": "5.4.0",
+			"fixed": "5.4.5"
+		},
+		{
+			"id": "CVE-2026-46532",
+			"component": "Bluedroid AVRCP",
+			"symbol": "avrc_",
+			"marker": "AVRC_PDU",
+			"summary": "crafted AVRCP command may read out of bounds",
+			"advisory": "GHSA-3pp8-42fh-3j3c",
+			"first": "5.4.0",
+			"fixed": "5.4.5"
+		}
+	]
+}

@@ -1,0 +1,16 @@
+strcpy
+strcat
+sprintf
+vsprintf
+gets
+scanf
+fscanf
+sscanf
+vscanf
+vfscanf
+vsscanf
+system
+popen
+tmpnam
+mktemp
+atoi
