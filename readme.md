@@ -1,6 +1,6 @@
 # V3RM1N
 
-<img src="media/logo.png"/>
+<img src="media/logo.png" width=300/>
 
 Firmware security scanner
 
