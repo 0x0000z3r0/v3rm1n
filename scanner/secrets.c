@@ -1,8 +1,10 @@
 #include "secrets.h"
 #include "bytes.h"
+#include "database.h"
 #include "print.h"
 
 #include <ctype.h>
+#include <json-c/json.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -10,9 +12,127 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define MIN_STRING 4
 #define MAX_DER_SIZE (1024 * 1024)
+#define MAX_DATABASE_SIZE (1024 * 1024)
+#define MAX_RULES 128
+#define MAX_RULE_LENGTH 128
+
+struct text_list {
+	const char *values[MAX_RULES];
+	size_t count;
+};
+
+struct secret_rules {
+	struct text_list token_prefixes;
+	struct text_list secret_keys;
+	struct text_list username_keys;
+	struct text_list ssid_keys;
+	struct text_list secure_url_schemes;
+	struct text_list insecure_url_schemes;
+	struct text_list domain_suffixes;
+	struct text_list pem_private_key_markers;
+	struct text_list pem_certificate_markers;
+};
+
+static bool has_value(const uint8_t *data, size_t length, const char *key);
+
+static bool
+load_list(json_object *root, const char *name, struct text_list *list)
+{
+	json_object *entries;
+	if (!json_object_object_get_ex(root, name, &entries) || !json_object_is_type(entries, json_type_array)) {
+		print_bad("secret database field is missing or invalid: %s", name);
+		return false;
+	}
+
+	size_t count = json_object_array_length(entries);
+	if (count > MAX_RULES) {
+		print_bad("secret database field %s has too many entries (maximum %u)", name, MAX_RULES);
+		return false;
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		json_object *entry = json_object_array_get_idx(entries, i);
+		if (!json_object_is_type(entry, json_type_string)) {
+			print_bad("invalid secret database entry %s[%zu]", name, i);
+			return false;
+		}
+
+		const char *text = json_object_get_string(entry);
+		if (text == NULL || text[0] == '\0' || strlen(text) > MAX_RULE_LENGTH) {
+			print_bad("invalid secret database entry %s[%zu]", name, i);
+			return false;
+		}
+		list->values[list->count++] = text;
+	}
+
+	return true;
+}
+
+static json_object *
+load_database(struct secret_rules *rules, size_t *count)
+{
+	char path[4096];
+	if (!database_file(path, sizeof(path), "secrets.json")) {
+		print_bad("secret database path is too long");
+		return NULL;
+	}
+
+	struct stat info;
+	if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > MAX_DATABASE_SIZE) {
+		print_bad("invalid secret database file: %s", path);
+		return NULL;
+	}
+
+	json_object *root = json_object_from_file(path);
+	if (root == NULL) {
+		print_bad("cannot parse secret database: %s", path);
+		return NULL;
+	}
+
+	json_object *schema;
+	bool valid = json_object_object_get_ex(root, "schema", &schema) && json_object_get_int(schema) == 1;
+	valid = valid && load_list(root, "token_prefixes", &rules->token_prefixes);
+	valid = valid && load_list(root, "secret_keys", &rules->secret_keys);
+	valid = valid && load_list(root, "username_keys", &rules->username_keys);
+	valid = valid && load_list(root, "ssid_keys", &rules->ssid_keys);
+	valid = valid && load_list(root, "secure_url_schemes", &rules->secure_url_schemes);
+	valid = valid && load_list(root, "insecure_url_schemes", &rules->insecure_url_schemes);
+	valid = valid && load_list(root, "domain_suffixes", &rules->domain_suffixes);
+	valid = valid && load_list(root, "pem_private_key_markers", &rules->pem_private_key_markers);
+	valid = valid && load_list(root, "pem_certificate_markers", &rules->pem_certificate_markers);
+	if (!valid) {
+		print_bad("invalid secret database schema");
+		json_object_put(root);
+		return NULL;
+	}
+
+	*count = rules->token_prefixes.count + rules->secret_keys.count + rules->username_keys.count + rules->ssid_keys.count + rules->secure_url_schemes.count + rules->insecure_url_schemes.count + rules->domain_suffixes.count + rules->pem_private_key_markers.count + rules->pem_certificate_markers.count;
+	return root;
+}
+
+static bool
+contains_any(const uint8_t *data, size_t length, const struct text_list *list)
+{
+	for (size_t i = 0; i < list->count; i++) {
+		if (bytes_contains_ci(data, length, list->values[i]))
+			return true;
+	}
+	return false;
+}
+
+static bool
+has_any_value(const uint8_t *data, size_t length, const struct text_list *list)
+{
+	for (size_t i = 0; i < list->count; i++) {
+		if (has_value(data, length, list->values[i]))
+			return true;
+	}
+	return false;
+}
 
 static bool
 has_value(const uint8_t *data, size_t length, const char *key)
@@ -45,21 +165,12 @@ has_value(const uint8_t *data, size_t length, const char *key)
 }
 
 static bool
-known_token(const uint8_t *data, size_t length)
+known_token(const uint8_t *data, size_t length, const struct secret_rules *rules)
 {
-	static const char *const prefixes[] = {
-	    "akia",
-	    "ghp_",
-	    "github_pat_",
-	    "xoxb-",
-	    "xoxp-",
-	    "aiza",
-	    "bearer ",
-	};
-
-	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
-		size_t position = bytes_find_ci(data, length, prefixes[i]);
-		if (position != SIZE_MAX && length - position >= strlen(prefixes[i]) + 8)
+	for (size_t i = 0; i < rules->token_prefixes.count; i++) {
+		const char *prefix = rules->token_prefixes.values[i];
+		size_t position = bytes_find_ci(data, length, prefix);
+		if (position != SIZE_MAX && length - position >= strlen(prefix) + 8)
 			return true;
 	}
 
@@ -115,25 +226,15 @@ has_ipv4(const uint8_t *data, size_t length)
 }
 
 static bool
-has_domain(const uint8_t *data, size_t length)
+has_domain(const uint8_t *data, size_t length, const struct secret_rules *rules)
 {
-	static const char *const endings[] = {
-	    ".com",
-	    ".net",
-	    ".org",
-	    ".io",
-	    ".dev",
-	    ".cloud",
-	    ".local",
-	    ".lan",
-	};
-
-	for (size_t i = 0; i < sizeof(endings) / sizeof(endings[0]); i++) {
-		size_t position = bytes_find_ci(data, length, endings[i]);
+	for (size_t i = 0; i < rules->domain_suffixes.count; i++) {
+		const char *suffix = rules->domain_suffixes.values[i];
+		size_t position = bytes_find_ci(data, length, suffix);
 		if (position == SIZE_MAX || position == 0)
 			continue;
 
-		size_t end = position + strlen(endings[i]);
+		size_t end = position + strlen(suffix);
 		bool left_valid = isalnum((unsigned char)data[position - 1]) || data[position - 1] == '-';
 		bool right_valid = end == length || (!isalnum((unsigned char)data[end]) && data[end] != '-');
 		if (left_valid && right_valid)
@@ -144,83 +245,46 @@ has_domain(const uint8_t *data, size_t length)
 }
 
 static bool
-has_url(const uint8_t *data, size_t length, bool *insecure)
+has_url(const uint8_t *data, size_t length, const struct secret_rules *rules, bool *insecure)
 {
-	static const char *const secure[] = {
-	    "https://",
-	    "mqtts://",
-	    "wss://",
-	};
-	static const char *const plain[] = {
-	    "http://",
-	    "mqtt://",
-	    "ws://",
-	    "ftp://",
-	    "telnet://",
-	};
-
-	for (size_t i = 0; i < sizeof(secure) / sizeof(secure[0]); i++) {
-		if (bytes_contains_ci(data, length, secure[i])) {
-			*insecure = false;
-			return true;
-		}
+	if (contains_any(data, length, &rules->secure_url_schemes)) {
+		*insecure = false;
+		return true;
 	}
-	for (size_t i = 0; i < sizeof(plain) / sizeof(plain[0]); i++) {
-		if (bytes_contains_ci(data, length, plain[i])) {
-			*insecure = true;
-			return true;
-		}
+	if (contains_any(data, length, &rules->insecure_url_schemes)) {
+		*insecure = true;
+		return true;
 	}
 
 	return false;
 }
 
 static void
-scan_string(const uint8_t *data, size_t length, size_t offset)
+scan_string(const uint8_t *data, size_t length, size_t offset, const struct secret_rules *rules)
 {
-	if (bytes_contains_ci(data, length, "-----begin private key-----") || bytes_contains_ci(data, length, "-----begin encrypted private key-----") || bytes_contains_ci(data, length, "-----begin rsa private key-----") || bytes_contains_ci(data, length, "-----begin ec private key-----")) {
+	if (contains_any(data, length, &rules->pem_private_key_markers)) {
 		print_text(true, "PEM private key", data, length, offset);
 		return;
 	}
-	if (bytes_contains_ci(data, length, "-----begin certificate-----")) {
+	if (contains_any(data, length, &rules->pem_certificate_markers)) {
 		print_text(false, "PEM certificate", data, length, offset);
 		return;
 	}
 
-	if (known_token(data, length))
+	if (known_token(data, length, rules))
 		print_text(true, "possible API token", data, length, offset);
 
-	static const char *const secret_keys[] = {
-	    "password",
-	    "passwd",
-	    "api_key",
-	    "api-key",
-	    "apikey",
-	    "token",
-	    "secret",
-	    "private_key",
-	    "private-key",
-	    "aes_key",
-	    "aes-key",
-	    "wifi_psk",
-	    "wifi-psk",
-	};
-	for (size_t i = 0; i < sizeof(secret_keys) / sizeof(secret_keys[0]); i++) {
-		if (has_value(data, length, secret_keys[i])) {
-			print_text(true, "possible hardcoded secret", data, length, offset);
-			break;
-		}
-	}
-
-	if (has_value(data, length, "username") || has_value(data, length, "user"))
+	if (has_any_value(data, length, &rules->secret_keys))
+		print_text(true, "possible hardcoded secret", data, length, offset);
+	if (has_any_value(data, length, &rules->username_keys))
 		print_text(false, "username", data, length, offset);
-	if (has_value(data, length, "ssid"))
+	if (has_any_value(data, length, &rules->ssid_keys))
 		print_text(false, "Wi-Fi SSID", data, length, offset);
 
 	bool insecure = false;
-	if (has_url(data, length, &insecure))
+	if (has_url(data, length, rules, &insecure))
 		print_text(insecure, insecure ? "insecure URL" : "URL", data, length, offset);
-	else if (has_domain(data, length))
+	else if (has_domain(data, length, rules))
 		print_text(false, "domain", data, length, offset);
 
 	if (has_ipv4(data, length))
@@ -290,6 +354,12 @@ scan_der(const struct image *image)
 int
 secrets_scan(const struct image *image)
 {
+	struct secret_rules rules = {0};
+	size_t rule_count = 0;
+	json_object *database = load_database(&rules, &rule_count);
+	if (database == NULL)
+		return -1;
+
 	size_t strings = 0;
 	for (size_t offset = 0; offset < image->size;) {
 		if (image->data[offset] < 0x20 || image->data[offset] > 0x7e) {
@@ -304,12 +374,14 @@ secrets_scan(const struct image *image)
 		size_t length = end - offset;
 		if (length >= MIN_STRING) {
 			strings++;
-			scan_string(image->data + offset, length, offset);
+			scan_string(image->data + offset, length, offset, &rules);
 		}
 		offset = end;
 	}
 
 	print_info("printable strings: %zu", strings);
+	print_info("secret detection rules loaded: %zu", rule_count);
 	scan_der(image);
+	json_object_put(database);
 	return 0;
 }

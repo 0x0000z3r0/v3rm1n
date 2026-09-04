@@ -1,9 +1,11 @@
-.PHONY: all hello clean
+SAMPLES := hello strip secrets secboot
 
-all: hello
+.PHONY: all clean $(SAMPLES)
 
-hello:
-	$(MAKE) -C hello
+all: $(SAMPLES)
+
+$(SAMPLES):
+	$(MAKE) -C $@
 
 clean:
-	$(MAKE) -C hello clean
+	for sample in $(SAMPLES); do $(MAKE) -C $$sample clean; done

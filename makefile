@@ -20,7 +20,7 @@ firmware: image
 	$(DOCKER_RUN) make -C firmware
 
 format: image
-	$(DOCKER_RUN) clang-format -i scanner/*.[ch] firmware/hello/main/hello.c
+	$(DOCKER_RUN) clang-format -i scanner/*.[ch] firmware/*/main/*.c
 
 clean:
 	rm -rf build
